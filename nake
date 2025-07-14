@@ -1,0 +1,257 @@
+#!/bin/bash
+
+BUILDDIR=out
+TRASHBIN=.trashbin
+
+CFLAGS_clang=-std=c17
+CPPFLAGS_clang=-std=c++17
+
+CFLAGS_cl=/std:c17
+CPPFLAGS_cl=/std:c++17
+
+LINKFLAGS_clang=
+LINKFLAGS_cl=
+
+if [ -z "$BUILDDIR" ]; then
+	BUILDDIR="out"
+fi
+
+if [ -z "$TRASHBIN" ]; then
+	TRASHBIN=".trashbin"
+fi
+
+echo () {
+	builtin echo "$@"
+}
+
+printf () {
+	builtin printf "$@"
+}
+
+
+getcompiler () {
+	if [ -z "$COMPILER" ]; then
+		printf "\033[90m"
+
+		if [ "0" = "1" ]; then
+			echo "a"
+			# adding just for code style
+		elif cd="$(which cl 2>/dev/null)"; then COMPILER=cl
+		elif cd="$(which clang 2> /dev/null)"; then COMPILER=clang
+		fi
+
+		if [ -n "$COMPILER" ]; then
+			echo Found $COMPILER at $cd
+		else
+			echo No compiler found
+		fi
+
+		printf "\033[m"
+
+		[ -n "$COMPILER" ]
+		return $?
+	fi
+
+	echo -e "\033[33mCompiling with $COMPILER\033[m"
+
+	return 0
+}
+
+nakeinfo () {
+	if [ -z "$1" ] && [ -z "$2" ]; then
+		return 1
+	fi
+
+	if [ -z "$1" ] || ! [ -f "$1" ]; then
+		return 1
+	fi
+
+	if [ -z "$2" ] || ! [ -f "$2" ]; then
+		return 0
+	fi
+
+	if [ "$1" -nt "$2" ]; then
+		return 0
+	else
+		return 1
+	fi
+
+	# Impossible!
+	return 2
+}
+
+compilefile () {
+	printf "\033[95m"
+	if [ "$COMPILER" = "clang" ]; then
+		local FLAGS
+		if [ "$1" = "c" ]; then
+			FLAGS=$CFLAGS_clang
+		elif [ "$1" = "cpp" ] || [ "$1" = "cc" ]; then
+			FLAGS=$CPPFLAGS_clang
+		fi
+
+		echo clang $CFLAGS_clang -c -o "$3" "$2"
+		printf "\033[m"
+
+		clang -c -o "$3" "$2"
+	elif [ "$COMPILER" = "cl" ]; then
+		local FLAGS
+		if [ "$1" = "c" ]; then
+			FLAGS=$CFLAGS_cl
+		elif [ "$1" = "cpp" ] || [ "$1" = "cc" ]; then
+			FLAGS=$CPPFLAGS_cl
+		fi
+
+		# replaces slashes with backslashes
+		echo MSYS_NO_PATHCONV=1 cl $FLAGS /c /Fo"${3//\//\\}" "$2"
+		printf "\033[m"
+
+		if ! output="$(MSYS_NO_PATHCONV=1 cl $FLAGS /c /Fo"${3//\//\\}" "$2")"; then
+			printf '%s\n' "$output"
+			return 1
+		fi
+	fi
+
+	return $?
+}
+
+compilefile_witherr () {
+	if ! compilefile "$2" "$3" "$4"; then
+		printf '%s' "$3" > "$1";
+	fi	
+}
+
+linkofiles () {
+	outfile="$1"
+	shift
+
+	if [ "$COMPILER" = "clang" ]; then
+		clang -o "$outfile" "$@"
+	elif [ "$COMPILER" = "cl" ]; then
+		MSYS_NO_PATHCONV=1 cl /Fe"$outfile" "$@"
+	fi
+}
+
+clean () {
+	echo Trashing build directory...
+
+	printf "\033[95m";
+	if [ ! -d "${TRASHBIN}" ]; then
+
+		echo mkdir -p "${TRASHBIN}"
+		mkdir -p "${TRASHBIN}"
+	fi
+
+	# Don't delete contents of $TRASHBIN in case $TRASHBIN points to root
+	# like that happened with steam last time and that kinda deleted everyth
+
+	targettrash="${TRASHBIN}/$(date)/"
+
+	echo mv out "${targettrash}"
+	mv out "${targettrash}"
+
+	printf "\033[m"
+
+	echo
+
+	cleantrashbin
+}
+
+cleantrashbin () {
+	if [ "${TRASHBIN}" = "/" ]; then
+		echo "Trashbin is root, not clearing"
+		return
+	fi
+
+	echo Scary!
+
+	printf "\033[95m";
+
+	echo echo rm -rf "${TRASHBIN}"
+
+	printf "\033[m"
+}
+
+build () {
+	naketmpBuildFailed="$(md5sum < <(date))"
+	naketmpBuildFailed="${naketmpBuildFailed% *}"
+	readarray -t -d '' files < <(find . \( -name "*.c"  -o -name "*.cpp" -o -name "*.cc" \) -type f -print0)
+
+	for _file in "${files[@]}"; do
+		file="${_file#./}"
+		partial_target="${file%.*}.obj"
+		target="${BUILDDIR}/${partial_target}"
+		outdir="${target%/*}"
+		ext="${file##*.}"
+
+		echo -e "\033[1;33m$file\033[m"
+
+		if ! [ -d "${outdir}" ]; then
+			printf "\033[95m";
+
+			echo mkdir -p ${outdir}
+			mkdir -p "${outdir}"
+
+			printf "\033[m"
+		fi
+
+
+		# if nakeinfo "$file" "$target"; then
+		# 	if ! compilefile "$ext" "$file" "$target"; then
+		# 		echo -e "\033[31mCompile failed at \033[1;31m${file}\033[0;31m. Stopping\033[m"
+		# 		return 1
+		# 	fi
+		# fi
+		
+		if nakeinfo "$file" "$target"; then
+			compilefile_witherr "$naketmpBuildFailed" "$ext" "$file" "$target" &
+		fi
+
+	done
+
+	wait
+
+	if [ -f "$naketmpBuildFailed" ]; then
+		failure="$(cat "$naketmpBuildFailed")"
+		rm "$naketmpBuildFailed"
+		echo -e "\033[31mCompile failed at \033[1;31m${failure}\033[0;31m. Stopping\033[m"
+		return 1
+	fi
+
+	readarray -t -d '' objfiles < <(find "$BUILDDIR" -name "*.obj" -type f -print0)
+	linkofiles "a.exe" "${objfiles[@]}"
+
+	return 0
+}
+
+helptext () {
+	echo Nake: make but i made it
+	echo
+	echo Usage: "${0}" [-h] [build \| clean]
+	echo
+	echo Options:
+	echo "  -h, --help   Show this help text."
+}
+
+
+case "${1}" in
+	"build")
+		getcompiler && build
+		;;
+
+	"clean")
+		clean
+		;;
+
+	"cleantrashbin")
+		cleantrashbin
+		;;
+
+	"-h"|"--help")
+		helptext
+		;;
+
+	*)
+		getcompiler && build
+		;;
+esac

@@ -1,0 +1,104 @@
+#!/bin/bash
+
+
+declare -A LOGPREFIX
+declare -A LOGSUFFIX
+
+resolveloglevel () {
+	case "$1" in
+		  debug) echo -n "0" ;;
+		    cmd) echo -n "1" ;;
+		   info) echo -n "2" ;;
+		warning) echo -n "3" ;;
+		  error) echo -n "4" ;;
+		  fatal) echo -n "5" ;;
+		      *) echo -n "$1" ;;
+	esac
+}
+
+logsetpresuf () {
+	local ll
+	ll="$(resolveloglevel "$1")"
+	LOGPREFIX["$ll"]="$2"
+	LOGSUFFIX["$ll"]="$3"
+}
+
+logsetpresuf   debug "\033[90m"   "\033[m"
+logsetpresuf     cmd "\033[35m"   "\033[m"
+logsetpresuf    info "\033[m"     "\033[m"
+logsetpresuf warning "\033[33m"   "\033[m"
+logsetpresuf   error "\033[91m"   "\033[m"
+logsetpresuf   fatal "\033[1;31m" "\033[m"
+
+
+if [ -z "$LOGLEVEL" ]; then
+	LOGLEVEL=debug
+fi
+
+LOGLEVEL="$(resolveloglevel "$LOGLEVEL")"
+
+
+log () {
+	local ll
+	ll="$(resolveloglevel "$1")"
+	shift
+
+	if [ "$ll" -ge "$LOGLEVEL" ]; then
+		echo -ne "${LOGPREFIX["$ll"]}"
+		echo -n  "$*"
+		echo -ne "${LOGSUFFIX["$ll"]}"
+	fi
+}
+
+logf () {
+	local ll
+	ll="$(resolveloglevel "$1")"
+	shift
+
+	if [ "$ll" -ge "$LOGLEVEL" ]; then
+		echo -ne "${LOGPREFIX["$ll"]}"
+		printf   "$@"
+		echo -ne "${LOGSUFFIX["$ll"]}"
+	fi
+}
+
+
+logputs () {
+	local ll
+	ll="$(resolveloglevel "$1")"
+	shift
+
+	if [ "$ll" -ge "$LOGLEVEL" ]; then
+		echo -ne "${LOGPREFIX["$ll"]}"
+		echo -n  "$*"
+		echo -e  "${LOGSUFFIX["$ll"]}"
+	fi
+}
+
+logputsf () {
+	local ll
+	ll="$(resolveloglevel "$1")"
+	shift
+
+	if [ "$ll" -ge "$LOGLEVEL" ]; then
+		echo -ne "${LOGPREFIX["$ll"]}"
+		printf   "$@"
+		echo -e  "${LOGSUFFIX["$ll"]}"
+	fi
+}
+
+
+logtest () {
+	local cmds=(log logf logputs logputsf)
+	local states=(debug cmd info warning error fatal)
+	for cmd in "${cmds[@]}"; do
+		echo "${cmd}:"
+		for state in "${states[@]}"; do
+			"$cmd" "$state" "The %s brown %s jumped over the lazy %s." "quick" "fox" "dog"
+			echo
+		done
+
+		echo ------
+	done
+}
+

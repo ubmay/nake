@@ -1,0 +1,285 @@
+#!/bin/bash
+
+source logging
+
+setbuildvars () {
+	declare -g -A CFLAGS
+	declare -g -A CPPFLAGS
+	declare -g -A LINKFLAGS
+
+	if [ -f "Nakefile" ]; then
+		logputs debug "Using local Nakefile"
+		eval "$(cat Nakefile)"
+	else
+		logputs warning "No nakefile found"
+	fi
+
+	! [[ -v BUILDDIR ]] && BUILDDIR=out
+	! [[ -v TRASHBIN ]] && TRASHBIN=.trashbin
+
+	! [[ -v CFLAGS[default] ]] && CFLAGS["default"]=-std=c17
+	! [[ -v CPPFLAGS[default] ]] && CPPFLAGS["default"]=-std=c++17
+
+	! [[ -v CFLAGS[cl] ]] && CFLAGS["cl"]=/std:c17
+	! [[ -v CPPFLAGS[cl] ]] && CPPFLAGS["cl"]=/std:c++17
+
+	! [[ -v LINKFLAGS[default] ]] && LINKFLAGS["default"]=
+	! [[ -v LINKFLAGS[cl] ]] && LINKFLAGS["cl"]=
+
+	! [[ -v COMPILERS ]] && COMPILERS=("cl" "gcc" "clang")
+
+	return 0
+}
+
+getcompiler () {
+	if [ -z "$COMPILER" ] || [ -z "$CC" ]; then
+		for c in "${COMPILERS[@]}"; do
+			logputs debug Checking "$c"...
+			if _output="$(which "$c" 2>/dev/null)"; then
+				CC="$_output"
+				COMPILER="$c"
+				break
+			fi
+		done
+
+		if [ -n "$COMPILER" ]; then
+			logputs info Found "$COMPILER" at "$CC"
+		else
+			logputs fatal "No compiler found (set: ${COMPILERS[@]})"
+			return 1
+		fi
+	fi
+
+	return 0
+}
+
+
+# nakeinfo <source> <target>
+nakeinfo () {
+	if [ -z "$1" ] && [ -z "$2" ]; then
+		return 1
+	fi
+
+	if [ -z "$1" ] || ! [ -f "$1" ]; then
+		return 1
+	fi
+
+	if [ -z "$2" ] || ! [ -f "$2" ]; then
+		return 0
+	fi
+
+	if [ "$1" -nt "$2" ]; then
+		return 0
+	else
+		return 1
+	fi
+
+	# Impossible!
+	return 2
+}
+
+
+# Usage: getcompilecmd ext filename output
+getcompilecmd () {
+	local flagsvar="${1^^}FLAGS"
+
+	local langvars
+	if [[ -v "$flagsvar[\"$COMPILER\"]" ]]; then
+		langvars="$flagsvar[\"$COMPILER\"]"
+	else
+		langvars="$flagsvar[\"default\"]"
+	fi
+
+	local flags
+	eval "flags=\"\${$langvars}\""
+	
+	local sharedflags
+	eval "sharedflags=\"\${$flagsvar[\"shared\"]}\""
+
+	local cmd
+	case "$COMPILER" in
+		cl) cmd="MSYS_NO_PATHCONV=1 \"$COMPILER\" /c $flags /Fo\"$3\" \"$2\" 2>&1" ;;
+		 *) cmd="\"$COMPILER\" -c $flags $sharedflags -o \"$3\" \"$2\"" ;;
+	esac
+
+	printf "%s" "$cmd"
+}
+
+
+# getlinkcmd output files
+getlinkcmd () {
+	local output="$1"
+	shift
+
+	local flags
+	if [[ -v "LINKFLAGS[\"$COMPILER\"]" ]]; then
+		flags="${LINKFLAGS["$COMPILER"]}"
+	else
+		flags="${LINKFLAGS["default"]}"
+	fi
+
+	local sharedflags="${LINKFLAGS["shared"]}"
+
+	local cmd
+	case "$COMPILER" in
+		cl) cmd="MSYS_NO_PATHCONV=1 \"$COMPILER\" /out:\"$output\"" ;;
+		 *) cmd="\"$COMPILER\" -o \"$output\"" ;;
+	esac
+
+	for file in "$@"; do
+		cmd+=" \"$file\""
+	done
+
+	cmd+=" $flags $sharedflags"
+
+	case "$COMPILER" in
+		cl) cmd+=" 2>&1" ;;
+	esac
+
+	printf "%s" "$cmd"
+}
+
+
+# cmdwrap desc failfile
+cmdwrap () {
+	local output
+	output="$(eval "$1")"
+	ecode="$?"
+
+	if [ "$ecode" -ne 0 ]; then
+		local desc
+		if [ -n "$2" ]; then
+			desc="$2"
+		else
+			desc="Command"
+		fi
+
+		if [ -n "$3" ]; then
+			echo "$1" >> "$3"
+		fi
+
+		logputs error "$2 failed with exit code $ecode"
+		logputs error "$output"
+		return "$ecode"
+	fi
+
+	return 0
+}
+
+# compilefile <source> <target> <failfile>
+compilefile () {
+	local ext="${1##*.}"
+	if [ "$ext" = "cc" ]; then
+		ext=cpp
+	fi
+
+	local dir="${2%/*}/"
+
+	if ! [ -d "$dir" ]; then
+		logputs cmd mkdir -p "\"$dir\""
+		mkdir -p "$dir"
+	fi
+
+	local cmd="$(getcompilecmd "$ext" "$1" "$2")"
+
+	if nakeinfo "$1" "$2"; then
+		logputs cmd "$cmd"
+		cmdwrap "$cmd" "Compiling $1" "$3" &
+	fi
+}
+
+
+# compile <builddir>
+compile () {
+	local files
+	find \( -name "$BUILDDIR" -type d -prune -o -true \) -type f \( -name "*.c" -o -name "*.cc" -o -name "*.cpp" \) -print0 > .nakefilelist
+	readarray -td '' files < .nakefilelist
+
+	local builddir
+	if [ -z "$1" ]; then
+		builddir="."
+	else
+		builddir="${BUILDDIR%/}"
+	fi
+
+	for _file in "${files[@]}"; do
+		local file="${_file#./}"
+		local target="${builddir}/${file%.*}.o"
+		compilefile "$file" "$target" ".nakebuildfailed"
+	done
+
+	wait
+}
+
+
+# link <objdir> <target>
+link () {
+	local objdir="${1:-.}"
+	local target="${2:-a.exe}"
+
+	find "$objdir" -type f -print0 > .nakeobjlist
+	readarray -td '' objs < .nakeobjlist
+
+	local cmd="$(getlinkcmd "$target" "${objs[@]}")"
+	logputs cmd $cmd
+	cmdwrap "$cmd" "Linking $target" .nakelinkfailed
+}
+
+
+build () {
+	[ -f .nakebuildfailed ] && rm .nakebuildfailed
+	[ -f .nakelinkfailed ] && rm .nakelinkfailed
+
+	compile "$BUILDDIR"
+	[ -f .nakebuildfailed ] || link "$BUILDDIR" "a.exe"
+}
+
+
+clean () {
+	if [ -f .nakebuildfailed ]; then
+		logputs cmd rm .nakebuildfailed
+		rm .nakebuildfailed
+	fi
+
+	if [ -f .nakelinkfailed ]; then
+		logputs cmd rm .nakelinkfailed
+		rm .nakelinkfailed
+	fi
+
+	if [ -d "$BUILDDIR" ]; then
+		logputs cmd rm -r "$BUILDDIR"
+		rm -r "$BUILDDIR"
+	fi
+}
+
+
+
+helptext () {
+	echo Nake2: make but i made it \(v2\)
+	echo
+	echo Usage: "${0}" [-h] [build \| clean]
+	echo
+	echo Options:
+	echo "  -h, --help   Show this help text."
+}
+
+
+case "${1}" in
+	"build")
+		setbuildvars &&
+		getcompiler &&
+		build
+		;;
+
+	"clean")
+		setbuildvars && clean
+		;;
+
+	"-h"|"--help")
+		helptext
+		;;
+
+	*)
+		setbuildvars && getcompiler && build
+		;;
+esac
