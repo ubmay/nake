@@ -122,7 +122,7 @@ getlinkcmd () {
 
 	local cmd
 	case "$COMPILER" in
-		cl) cmd="MSYS_NO_PATHCONV=1 \"$COMPILER\" /out:\"$output\"" ;;
+		cl) cmd="MSYS_NO_PATHCONV=1 \"$COMPILER\" /Fe\"$output\"" ;;
 		 *) cmd="\"$COMPILER\" -o \"$output\"" ;;
 	esac
 
